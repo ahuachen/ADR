@@ -29,10 +29,12 @@ REGISTRY_LIMIT = 4 * 1024 * 1024
 CLAUDE_PLUGINS = "/.claude/plugins"
 CODEX_CONFIG = "/.codex/config.toml"
 CODEX_CACHE = "/.codex/plugins/cache"
+CURSOR_PLUGINS = "/.cursor/plugins"
 #: Where each host's marketplace clone keeps its plugin listing.
 MARKETPLACE_MANIFESTS: tuple[str, ...] = (
     "/.claude-plugin/marketplace.json",
     "/.agents/plugins/marketplace.json",
+    "/.cursor-plugin/marketplace.json",
 )
 
 #: `git@host:owner/repo.git`, the scp-like form that `urlsplit` cannot read.
@@ -92,6 +94,8 @@ class Registries:
     listings: tuple[Listing, ...] = ()
     #: Every version directory in Claude Code's plugin cache, recorded or not.
     cached: tuple[Install, ...] = ()
+    #: Cache directories a host never finished writing: no manifest, or no version.
+    incomplete: tuple[str, ...] = ()
 
     def marketplace(self, host: str, name: str) -> Marketplace | None:
         return next((m for m in self.marketplaces if m.host == host and m.name == name), None)
@@ -120,13 +124,13 @@ def read_registries(gate, homes: tuple[str, ...]) -> Registries:
     installs: list[Install] = []
     toggles: list[Toggle] = []
     cached: list[Install] = []
+    incomplete: list[str] = []
     for home in homes:
-        claude = _claude(gate, home)
-        codex = _codex(gate, home)
-        for part in (claude, codex):
+        for part in (_claude(gate, home), _codex(gate, home), _cursor(gate, home)):
             marketplaces.extend(part.marketplaces)
             installs.extend(part.installs)
             toggles.extend(part.toggles)
+            incomplete.extend(part.incomplete)
         cached.extend(
             Install("claude", plugin, market, path, version=version)
             for market, plugin, version, path in _cache_entries(gate, home + CLAUDE_PLUGINS + "/cache")
@@ -135,14 +139,16 @@ def read_registries(gate, homes: tuple[str, ...]) -> Registries:
         listing for market in marketplaces if market.location
         for listing in _listings(gate, market)
     )
-    found = Registries(tuple(marketplaces), tuple(installs), tuple(toggles), listings, tuple(cached))
-    if marketplaces or installs or toggles or cached:
+    found = Registries(tuple(marketplaces), tuple(installs), tuple(toggles), listings, tuple(cached),
+                       tuple(incomplete))
+    if marketplaces or installs or toggles or cached or incomplete:
         missing = sum(1 for i in installs if not i.present)
         gate.ledger.probe(
             "plugin_registries", "ran",
             f"{len(marketplaces)} marketplaces, {len(installs)} install records "
             f"({missing} missing on disk), {len(toggles)} enablement entries, "
-            f"{len(listings)} marketplace listings, {len(cached)} cached versions",
+            f"{len(listings)} marketplace listings, {len(cached)} cached versions"
+            + (f", {len(incomplete)} incomplete cache copies" if incomplete else ""),
         )
     return found
 
@@ -184,15 +190,17 @@ def plugin_roots(found: Registries) -> tuple[tuple[str, Provenance, bool], ...]:
 def _provenance(found: Registries, state: str, records: list[Install]) -> Provenance:
     first = records[0]
     market = found.marketplace(first.host, first.marketplace)
+    # A plugin installed from a local directory has no marketplace.
+    name = first.marketplace or None
     if state != INSTALLED:
-        return Provenance(state, first.host, first.marketplace, market.source if market else None,
+        return Provenance(state, first.host, name, market.source if market else None,
                           first.plugin, first.version)
     scopes = [r.scope for r in records if r.scope]
     decided = [found.enabled(r) for r in records]
     # On anywhere is on; off only when every record is decided off.
     enabled = True if True in decided else (None if None in decided else False)
     return Provenance(
-        state, first.host, first.marketplace, market.source if market else None,
+        state, first.host, name, market.source if market else None,
         first.plugin, first.version,
         install_scope=min(scopes, key=lambda s: _SCOPE_ORDER.index(s) if s in _SCOPE_ORDER else 9, default=None),
         installed_at=min((r.installed_at for r in records if r.installed_at), default=None),
@@ -309,6 +317,68 @@ def _codex(gate, home: str) -> Registries:
     return Registries(tuple(marketplaces), tuple(installs), tuple(toggles))
 
 
+# ----------------------------------------------------------------- cursor
+
+
+def _cursor(gate, home: str) -> Registries:
+    """Cursor keeps neither install records nor toggles on disk.
+
+    Its cache holds `<marketplace>/<plugin>/<commit>` copies; a copy that
+    carries its manifest is installed, and one without (Cursor leaves empty
+    directories behind when a download stops) is counted, not reported.
+    Marketplace clones sit at `marketplaces/<host>/<owner>/<repo>/<commit>`,
+    and the cache names a marketplace `<owner>-<repo>`. Whether a plugin is
+    switched on lives in the editor's own state, so `enabled` stays unknown.
+    """
+    base = home + CURSOR_PLUGINS
+    if not gate.stat(base).ok:
+        return Registries()
+    marketplaces = []
+    for site in _subdirs(gate, f"{base}/marketplaces"):
+        if _name(site).startswith("_"):  # `_staging`: a clone in progress
+            continue
+        for owner in _subdirs(gate, site):
+            for repo in _subdirs(gate, owner):
+                clones = [c for c in _subdirs(gate, repo) if marketplace_at(gate, c)]
+                marketplaces.append(Marketplace(
+                    "cursor", f"{_name(owner)}-{_name(repo)}",
+                    source_ref({"source": "git", "url": f"https://{_name(site)}/{_name(owner)}/{_name(repo)}"}, home),
+                    location=clones[-1] if clones else None,
+                ))
+    installs: list[Install] = []
+    incomplete: list[str] = []
+    for market in _subdirs(gate, f"{base}/cache"):
+        for plugin in _subdirs(gate, market):
+            copies = _subdirs(gate, plugin)
+            if not copies:
+                incomplete.append(plugin)
+            for copy in copies:
+                install = _cursor_install(gate, copy, _name(plugin), _name(market), "user")
+                if install is None:
+                    incomplete.append(copy)
+                else:
+                    installs.append(install)
+    for plugin in _subdirs(gate, f"{base}/local"):
+        install = _cursor_install(gate, plugin, _name(plugin), "", "local")
+        if install is not None:
+            installs.append(install)
+    return Registries(tuple(marketplaces), tuple(installs), incomplete=tuple(incomplete))
+
+
+def _cursor_install(gate, path: str, plugin: str, market: str, scope: str) -> Install | None:
+    manifest = path + "/.cursor-plugin/plugin.json"
+    if not gate.stat(manifest).ok:
+        return None
+    document = _document(gate, manifest) or {}
+    # The copy is named by commit; the manifest carries the release.
+    version = _text(document.get("version")) or (_name(path) if scope != "local" else None)
+    return Install("cursor", plugin, market, path, version=version, scope=scope)
+
+
+def _name(path: str) -> str:
+    return path.rsplit("/", 1)[-1]
+
+
 def _cache_entries(gate, base: str):
     """`<cache>/<marketplace>/<plugin>/<version>`, three listings deep."""
     if not gate.stat(base).ok:
@@ -331,7 +401,9 @@ def _subdirs(gate, path: str) -> list[str]:
 
 
 def _listings(gate, market: Marketplace) -> list[Listing]:
-    for suffix in MARKETPLACE_MANIFESTS:
+    # A clone may serve several hosts; read the listing its own host reads.
+    own = [s for s in MARKETPLACE_MANIFESTS if f"/.{market.host}-plugin/" in s]
+    for suffix in own + [s for s in MARKETPLACE_MANIFESTS if s not in own]:
         path = market.location + suffix
         if gate.stat(path).ok:
             document = _document(gate, path) or {}
