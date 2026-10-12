@@ -11,7 +11,7 @@ A policy names things two ways:
   everything else (MCP servers, skills, hooks' files, packages). These use
   the same identity kinds as an artifact feed, so one list can drive both:
 
-    {"kind": "skill_sha256", "sha256": "<64 hex>"}      raw SKILL.md bytes
+    {"kind": "skill_sha256", "sha256": "<64 hex>"}      the skill's folder hash
     {"kind": "file_sha256",  "sha256": "<64 hex>"}      the asset's content hash
     {"kind": "mcp_endpoint", "url": "https://..."}      exact normalized URL
     {"kind": "package", "ecosystem": "npm"|"pypi", "name": "...",

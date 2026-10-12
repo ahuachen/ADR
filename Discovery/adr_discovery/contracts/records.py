@@ -251,8 +251,10 @@ class Asset:
     #: frontmatter permits and the model it pins. Never the prose.
     allowed_tools: tuple[str, ...] = ()
     model: str | None = None
-    #: Skills only: sha256 of the raw SKILL.md bytes (not the directory, not
-    #: normalized), the identity a known-bad/approved artifact list uses.
+    #: Skills only: the folder hash of the skill directory (every regular
+    #: file, its relative path and execute bit; see `Gate.hash_tree`), the
+    #: identity a known-bad/approved artifact list uses. Absent when the
+    #: tree was over the caps or not fully readable.
     skill_sha256: str | None = None
     #: sha256 of the identified file, when one was read within the size cap.
     content_hash: str | None = None

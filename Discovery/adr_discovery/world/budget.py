@@ -37,8 +37,17 @@ class Budget:
     #: before the generic sweep. A cap, not a reservation: what they do not
     #: use stays available to everything after them.
     state_root_share: float = 0.25
+    #: Folder hashing (`Gate.hash_tree`) is charged here, not to the entry
+    #: ceiling or the read cap: hashing what the sweep found must not starve
+    #: the sweep. The per-tree caps are the limits `archive` enforces when it
+    #: reads a zip, so any tree hashed here can also be archived.
+    max_hash_bytes: int = 1024 * 1024 * 1024
+    max_tree_files: int = 10_000
+    max_tree_file_bytes: int = 20 * 1024 * 1024
+    max_tree_bytes: int = 100 * 1024 * 1024
 
     entries_used: int = field(default=0, init=False)
+    hash_bytes_used: int = field(default=0, init=False)
     _ceiling: int | None = field(default=None, init=False, repr=False)
     started: float = field(default_factory=time.monotonic, init=False)
 
@@ -70,6 +79,13 @@ class Budget:
         if self.entries_used >= self.entry_cap:
             return False
         self.entries_used += n
+        return True
+
+    def take_hash_bytes(self, n: int) -> bool:
+        """Claim `n` bytes of the hashing budget, all or nothing."""
+        if self.hash_bytes_used + n > self.max_hash_bytes:
+            return False
+        self.hash_bytes_used += n
         return True
 
     @property

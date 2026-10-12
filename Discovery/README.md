@@ -81,7 +81,7 @@ the same kinds as a shared known-bad artifact feed. See
 
 | Indicator | Matches |
 | --- | --- |
-| `{"kind": "skill_sha256", "sha256": ...}` | Skills whose raw `SKILL.md` bytes hash to it (`skill_sha256` on the asset) |
+| `{"kind": "skill_sha256", "sha256": ...}` | Skills whose folder hash equals it (`skill_sha256` on the asset) |
 | `{"kind": "file_sha256", "sha256": ...}` | Assets whose `content_hash` equals it |
 | `{"kind": "mcp_endpoint", "url": ...}` | MCP servers declaring that URL (scheme/host case, query and trailing slash ignored) |
 | `{"kind": "package", "ecosystem": "npm"\|"pypi", "name": ..., "versions": [...] \| "all_versions": true}` | MCP servers launched with `npx`/`bunx`/`pnpm dlx`/`uvx`/`pipx` for that package, and package-manager assets. A launch that pins no version matches only `all_versions` |

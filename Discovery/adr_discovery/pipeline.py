@@ -254,11 +254,13 @@ def _observation_from_declaration(candidate: Candidate, declaration: Declaration
         changed_file = f"{declaration.path.rstrip('/')}/SKILL.md"
     modified = _modified(gate.stat(changed_file)) if gate is not None else None
     if declaration.kind is Kind.SKILL and gate is not None:
-        # sha256 of the raw SKILL.md bytes, exactly: the identity a shared
-        # artifact list uses. One size-capped read, never partial bytes.
-        digest = content_hash(gate, changed_file)
-        if digest:
-            detail["skill_sha256"] = digest
+        # The folder hash of the whole skill directory: a payload in
+        # scripts/ changes it as surely as an edit to SKILL.md does. A tree
+        # over the caps, or with an unreadable file, gets none (recorded by
+        # the gate) rather than a hash of part of it.
+        digest = gate.hash_tree(declaration.path)
+        if digest.ok:
+            detail["skill_sha256"] = digest.value.sha256
     if declaration.kind is not Kind.MCP_SERVER:
         detail["install_method"] = "agent_artifact"
     version = declaration.raw.get("version")

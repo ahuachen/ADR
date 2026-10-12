@@ -205,11 +205,13 @@ liveness      running · installed · declared_only
 last_used     from Sensor session telemetry
 modified      latest mtime of the file behind it (a skill's SKILL.md, a declaration's config file), ISO-8601 UTC
 risk          {pinned, factors[], credential_kinds[], env_names[], …}
-skill_sha256  skills only: sha256 of the raw SKILL.md bytes (also content_hash, package_id when known)
+skill_sha256  skills only: folder hash of the skill directory, below (also content_hash, package_id when known)
 hook_event    hooks only: lifecycle event (hook_matcher: tool matcher); the command is never emitted
 ```
 
 Schema 1.1 changed identity for declarations (see `identity`), so `asset_id` of those kinds differs from 1.0 and the first delta across the upgrade reports them as disappeared and appeared. Catalogued binaries and processes are unaffected.
+
+`skill_sha256` is the folder hash of the skill's directory, so a payload in `scripts/` changes it as surely as an edit to `SKILL.md`. Walk the directory without following symlinks and keep regular files only; sort their `/`-separated relative paths byte-wise; feed one running sha256, per file, with `<rel>\n<x>\n` (`x` is `1` when any execute bit is set, else `0`) and then the file's bytes; emit lowercase hex. An empty directory hashes to `sha256("")`. A tree over 10,000 files, 20 MiB per file or 100 MiB in total, or with any file that cannot be read, gets no hash and a `no_folder_hash` coverage boundary — never a hash of part of it.
 
 `evidence` makes every claim checkable, and `verification` says which rung of the ladder established identity — so a reader can tell a package-owned binary from a filename that looked right. Discovered executables are never run. OS inventory helpers use fixed absolute paths through a separate bounded-output interface; they cannot be selected through the scanner's inherited `PATH`.
 
