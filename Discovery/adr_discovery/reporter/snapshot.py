@@ -12,7 +12,17 @@ import json
 from enum import Enum
 
 from ..contracts.evidence import Band, Channel, Evidence, Rung
-from ..contracts.records import Asset, Finding, Kind, Liveness, Provenance, ReviewItem, Risk, SourceRef
+from ..contracts.records import (
+    ArchiveRef,
+    Asset,
+    Finding,
+    Kind,
+    Liveness,
+    Provenance,
+    ReviewItem,
+    Risk,
+    SourceRef,
+)
 from ..contracts.snapshot import (
     SCHEMA_VERSION,
     BoundaryHit,
@@ -116,6 +126,7 @@ def _asset(row: dict) -> Asset:
         running_versions=tuple(row.get("running_versions", ())),
         provenance=_provenance(row.get("provenance")),
         plugin_asset_id=row.get("plugin_asset_id"),
+        archive=ArchiveRef(**row["archive"]) if row.get("archive") else None,
     )
 
 

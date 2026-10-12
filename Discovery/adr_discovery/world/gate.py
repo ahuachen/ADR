@@ -103,7 +103,7 @@ class TreeSink(Protocol):
     def update(self, chunk: bytes) -> None: ...
 
 
-class _HashSink:
+class FolderHash:
     """The folder hash: per file, ``<rel>\n<x>\n`` then the raw bytes, all
     into one running sha256. ``x`` is 1 when any execute bit is set."""
 
@@ -481,7 +481,7 @@ class Gate:
         sha256 as ``<rel>\\n<x>\\n`` then its bytes (``x`` is 1 when any
         execute bit is set). Equal trees hash equal wherever they sit.
         """
-        sink = _HashSink()
+        sink = FolderHash()
         read = self.read_tree(logical_root, sink)
         if not read.ok:
             return read

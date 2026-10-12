@@ -27,9 +27,11 @@ from .world import host_identity
 from .world.budget import Budget
 from .world.gate import Gate
 from .world.platform import for_host
+from .world.store import ArchiveStore
 
 EXIT_OK, EXIT_ERROR, EXIT_PARTIAL = 0, 1, 2
 MAX_JSON_INPUT = 16 * 1024 * 1024
+ARCHIVE_DEFAULT = "<output-dir>/skill-archives"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,6 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--resolve", action="store_true",
                    help="look up model-provider hostnames to match connections by address "
                         "(sends DNS queries; off by default)")
+    p.add_argument("--archive-skills", nargs="?", const=ARCHIVE_DEFAULT, metavar="DIR",
+                   help="also keep a zip of every skill, named by its folder hash, plus index.jsonl "
+                        "(local only, owner-only; default <output-dir>/skill-archives)")
     p.add_argument("--max-entries", type=int, default=200_000, help="shared sweep ceiling")
     p.add_argument("--max-children", type=int, default=5_000,
                    help="largest directory whose subdirectories are still walked")
@@ -98,6 +103,13 @@ def main(argv: list[str] | None = None) -> int:
         resolve_names=args.resolve,
     )
 
+    archive_to = None
+    if args.archive_skills and not args.dry_run:  # --dry-run writes nothing
+        directory = args.archive_skills
+        if directory == ARCHIVE_DEFAULT:
+            directory = os.path.join(args.output_dir, "skill-archives")
+        archive_to = ArchiveStore(directory)
+
     snapshot = discover(
         gate, catalog, policy, telemetry,
         # From the operating system, not USER/LOGNAME, and the same value
@@ -106,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         username=host_identity.username(),
         platform_name=platform.system().lower(),
         timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        archive_to=archive_to,
     )
 
     if args.json:

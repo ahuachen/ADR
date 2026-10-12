@@ -221,6 +221,14 @@ class Provenance:
 
 
 @dataclass(frozen=True, slots=True)
+class ArchiveRef:
+    """A local zip of the asset's files, named and verified by its folder hash."""
+
+    path: str
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class Asset:
     """M5 output, judged by M6, serialized by M7."""
 
@@ -271,6 +279,8 @@ class Asset:
     provenance: Provenance | None = None
     #: The plugin asset whose directory holds this one.
     plugin_asset_id: str | None = None
+    #: Skills archived with --archive-skills: the zip and its sha256.
+    archive: ArchiveRef | None = None
 
 
 @dataclass(frozen=True, slots=True)

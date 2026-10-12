@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from .archive import Archiver
 from .catalog.load import EMPTY as EMPTY_CATALOG
 from .catalog.load import Catalog
 from .contracts.evidence import Channel, Evidence
@@ -31,13 +32,21 @@ from .contracts.snapshot import Snapshot
 from .enumerator import enumerate_candidates
 from .enumerator.roots import homes
 from .extractor import extract
-from .extractor.registries import AVAILABLE, UNREGISTERED, marketplace_at, plugin_roots, read_registries
+from .extractor.registries import (
+    AVAILABLE,
+    UNREGISTERED,
+    home_relative,
+    marketplace_at,
+    plugin_roots,
+    read_registries,
+)
 from .extractor.surfaces import plugin_declaration, surface_for
 from .identifier import content_hash, identify, is_reviewable, score, signals_for
 from .judge import EMPTY as EMPTY_POLICY
 from .judge import Policy, judge
 from .resolver import resolve
 from .world.gate import Gate
+from .world.store import ArchiveStore
 
 CATALOG_RESOURCE = "catalog/catalog.json"
 
@@ -58,8 +67,13 @@ def discover(
     username: str = "unknown",
     platform_name: str = "unknown",
     timestamp: str = "",
+    archive_to: ArchiveStore | None = None,
 ) -> Snapshot:
-    """One scan, one snapshot. Emitted even when nothing is found."""
+    """One scan, one snapshot. Emitted even when nothing is found.
+
+    With `archive_to`, every skill that has a folder hash is also archived
+    there (see `archive`), and its asset says where.
+    """
     catalog = catalog if catalog is not None else EMPTY_CATALOG
     ledger = gate.ledger
 
@@ -111,6 +125,8 @@ def discover(
     assets = resolve(tuple(observations), telemetry, ledger)
     assets = _mark_undeclared(assets, declarations)
     assets = _with_provenance(gate, assets, roots)
+    if archive_to is not None:
+        assets = _archived(gate, assets, archive_to, timestamp)
 
     # -- M6 ------------------------------------------------------------
     by_asset = _declarations_by_asset(assets, declarations)
@@ -132,6 +148,45 @@ def discover(
 
 
 # --------------------------------------------------------------- adapters
+
+
+def _archived(gate, assets, store: ArchiveStore, timestamp: str):
+    """Archive each hashed skill; a skill that cannot be archived keeps its
+    asset and leaves a degraded probe saying why."""
+    from dataclasses import asdict, replace
+
+    try:
+        store.open()
+    except OSError as exc:
+        gate.ledger.unavailable("skill_archive", exc.strerror or str(exc))
+        return assets
+    archiver = Archiver(store, timestamp)
+    user_homes = homes(gate)
+    out, archived, written = [], 0, 0
+    for asset in assets:
+        if asset.kind is not Kind.SKILL or not asset.skill_sha256 or not asset.install_path:
+            out.append(asset)
+            continue
+        result = archiver.archive(gate, asset.install_path, expected=asset.skill_sha256)
+        if not result.ok:
+            gate.ledger.probe("skill_archive", "degraded",
+                              f"{asset.install_path}: {result.reason} {result.detail}".rstrip())
+            out.append(asset)
+            continue
+        home = next((h for h in user_homes if asset.install_path.startswith(h.rstrip("/") + "/")), None)
+        archiver.record(
+            result.value, name=asset.name, source=home_relative(asset.install_path, home),
+            provenance=asdict(asset.provenance) if asset.provenance else None,
+        )
+        archived += 1
+        written += result.value.written
+        out.append(replace(asset, archive=result.value.ref))
+    try:
+        archiver.close()
+    except OSError as exc:
+        gate.ledger.probe("skill_archive", "degraded", f"index not written: {exc.strerror or exc}")
+    gate.ledger.probe("skill_archive", "ran", f"{archived} skills archived, {written} new archives")
+    return tuple(out)
 
 
 def _dedupe_surfaces(gate, candidates) -> list[Candidate]:
