@@ -107,6 +107,8 @@ def _asset(row: dict) -> Asset:
         flags=tuple(row.get("flags", ())),
         hook_event=row.get("hook_event"),
         hook_matcher=row.get("hook_matcher"),
+        allowed_tools=tuple(row.get("allowed_tools", ())),
+        model=row.get("model"),
         skill_sha256=row.get("skill_sha256"),
         content_hash=row.get("content_hash"),
         package_id=row.get("package_id"),

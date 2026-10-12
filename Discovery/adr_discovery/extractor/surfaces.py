@@ -114,19 +114,24 @@ def _declaration(gate, entry, kind: Kind, scope: str, nested: bool, skipped: lis
 
     declared_name = str(metadata.get("name") or name.removesuffix(".md"))
     tools = metadata.get("allowed-tools") or metadata.get("allowed_tools") or metadata.get("tools")
+    model = metadata.get("model")
+    raw: dict[str, object] = {
+        "surface": kind.value,
+        # What it is permitted to touch, which is the whole reason a
+        # skill is inventory and not documentation.
+        "allowed_tools": _as_tuple(tools),
+        "model": model if isinstance(model, str) and model else None,
+    }
+    version = _as_version(metadata.get("version"))
+    if version:
+        raw["version"] = version
 
     return Declaration(
         kind=kind,
         name=declared_name,
         path=entry.path,
         scope=scope,
-        raw={
-            "surface": kind.value,
-            # What it is permitted to touch, which is the whole reason a
-            # skill is inventory and not documentation.
-            "allowed_tools": _as_tuple(tools),
-            "model": metadata.get("model"),
-        },
+        raw=raw,
     )
 
 
@@ -134,6 +139,14 @@ def _manifest_of(gate, path: str, kind: Kind) -> str | None:
     for suffix in MANIFESTS.get(kind, ()):
         if gate.stat(path + suffix).ok:
             return path + suffix
+    return None
+
+
+def _as_version(value) -> str | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (str, int, float)):
+        return str(value).strip() or None
     return None
 
 

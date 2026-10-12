@@ -80,6 +80,8 @@ def resolve(observations: tuple[Observation, ...], telemetry: dict[str, str] | N
                 flags=_flags(rows),
                 hook_event=_hook_field(primary, "event"),
                 hook_matcher=_hook_field(primary, "matcher"),
+                allowed_tools=tuple(str(t) for t in primary.detail.get("allowed_tools") or ()),
+                model=_text(primary.detail.get("model")),
                 skill_sha256=_skill_sha256(primary),
                 content_hash=next((r.content_hash for r in rows if r.content_hash), None),
                 package_id=next((r.package_id for r in rows if r.package_id), None),
@@ -169,6 +171,10 @@ def _hook_field(primary: Observation, key: str) -> str | None:
         return None
     value = primary.detail.get(key)
     return value if isinstance(value, str) else None
+
+
+def _text(value) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _skill_sha256(primary: Observation) -> str | None:

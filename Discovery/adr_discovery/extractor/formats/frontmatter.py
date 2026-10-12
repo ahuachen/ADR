@@ -39,6 +39,9 @@ ALLOWED_KEYS: frozenset[str] = frozenset(
 #: Keys whose value is a list of tool names.
 LIST_KEYS: frozenset[str] = frozenset({"allowed-tools", "allowed_tools", "tools"})
 
+#: Keys kept as written: `version: 1.10` is not the number 1.1.
+TEXT_KEYS: frozenset[str] = frozenset({"version"})
+
 _KEY = re.compile(r"""^(?P<key>"[^"]*"|'[^']*'|[^\s:#'"-][^:]*?)\s*:(?:\s+(?P<rest>.*))?$""")
 _BLOCK_SCALAR = re.compile(r"^([|>])[0-9+-]*\s*(?:#.*)?$")
 _UNREADABLE_START = ("&", "*", "!", "<<")
@@ -171,6 +174,10 @@ def _value(key: str, rest: str, continuation: list[str]):
 
     # A plain or quoted scalar, possibly continued on the following lines.
     text = " ".join([rest, *(_strip_comment(line.strip()) for line in content if not line.strip().startswith("#"))])
+    if key in TEXT_KEYS:
+        text = text.strip()
+        quoted = len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'"
+        return text[1:-1] if quoted else text
     return typed_scalar(text.strip())
 
 

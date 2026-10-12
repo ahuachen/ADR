@@ -210,6 +210,10 @@ class Asset:
     #: Hooks only: the lifecycle event and tool matcher. The command stays private.
     hook_event: str | None = None
     hook_matcher: str | None = None
+    #: Skills, commands, agent definitions and output styles: the tools the
+    #: frontmatter permits and the model it pins. Never the prose.
+    allowed_tools: tuple[str, ...] = ()
+    model: str | None = None
     #: Skills only: sha256 of the raw SKILL.md bytes (not the directory, not
     #: normalized), the identity a known-bad/approved artifact list uses.
     skill_sha256: str | None = None
