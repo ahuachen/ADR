@@ -24,14 +24,15 @@ from .contracts.records import (
     Kind,
     Liveness,
     Observation,
+    Provenance,
     ReviewItem,
 )
 from .contracts.snapshot import Snapshot
 from .enumerator import enumerate_candidates
 from .enumerator.roots import homes
 from .extractor import extract
-from .extractor.registries import read_registries
-from .extractor.surfaces import surface_for
+from .extractor.registries import AVAILABLE, UNREGISTERED, marketplace_at, plugin_roots, read_registries
+from .extractor.surfaces import plugin_declaration, surface_for
 from .identifier import content_hash, identify, is_reviewable, score, signals_for
 from .judge import EMPTY as EMPTY_POLICY
 from .judge import Policy, judge
@@ -66,7 +67,8 @@ def discover(
     candidates = enumerate_candidates(gate)
 
     # -- M3 ------------------------------------------------------------
-    read_registries(gate, homes(gate))
+    registries = read_registries(gate, homes(gate))
+    roots = plugin_roots(registries)
     declarations: list[tuple[Candidate, Declaration]] = []
     for candidate in _dedupe_surfaces(gate, candidates):
         if candidate.kind == "marker_dir" and surface_for(candidate.path) is None:
@@ -81,6 +83,7 @@ def discover(
             )
         for declaration in extraction.declarations:
             declarations.append((candidate, declaration))
+    declarations.extend(_registered_plugins(gate, roots, declarations))
 
     # -- M4 ------------------------------------------------------------
     observations: list[Observation] = []
@@ -107,6 +110,7 @@ def discover(
     # -- M5 ------------------------------------------------------------
     assets = resolve(tuple(observations), telemetry, ledger)
     assets = _mark_undeclared(assets, declarations)
+    assets = _with_provenance(gate, assets, roots)
 
     # -- M6 ------------------------------------------------------------
     by_asset = _declarations_by_asset(assets, declarations)
@@ -287,6 +291,81 @@ def _alias_evidence(candidate: Candidate, declaration: Declaration) -> tuple[Evi
         Evidence("enumerator", Channel.CONFIG, alias, f"links to {declaration.path}", 0.85)
         for alias in candidate.detail.get("aliases", ())
     )
+
+
+def _registered_plugins(gate, roots, declarations) -> list[tuple[Candidate, Declaration]]:
+    """An installed or cached copy of a plugin is a plugin, wherever it sits.
+
+    A marketplace's listings are not added: a large one offers thousands of
+    plugins, none of them loaded from there, and what the sweep does reach
+    inside them still gets their provenance.
+    """
+    seen = {d.path for _, d in declarations if d.kind is Kind.PLUGIN}
+    out = []
+    for path, provenance, installed_copy in roots:
+        if not installed_copy or path in seen or not gate.stat(path).ok:
+            continue
+        candidate = Candidate(kind="marker_dir", path=path, source="plugin_registry")
+        out.append((candidate, plugin_declaration(gate, path, "plugin", provenance.plugin or path.rsplit("/", 1)[-1])))
+    return out
+
+
+def _with_provenance(gate, assets: tuple[Asset, ...], roots) -> tuple[Asset, ...]:
+    """Attach what the registries say to every asset inside a placed directory.
+
+    The innermost placed directory decides. A plugin no registry places
+    is `available` when a marketplace clone holds it and `unregistered`
+    otherwise, and what it contains inherits that.
+    """
+    from dataclasses import replace
+
+    placed = {path: provenance for path, provenance, _ in roots}
+    plugins = {a.install_path: a for a in assets if a.kind is Kind.PLUGIN and a.install_path}
+    for path in sorted(plugins, key=len):
+        if path not in placed:
+            around = _container(placed, path)
+            placed[path] = _unplaced(gate, plugins[path], placed[around] if around else None)
+
+    out = []
+    for asset in assets:
+        root = _container(placed, asset.install_path)
+        if root is None:
+            out.append(asset)
+            continue
+        owner = _container(plugins, asset.install_path, proper=True)
+        out.append(replace(
+            asset, provenance=placed[root],
+            plugin_asset_id=plugins[owner].asset_id if owner else None,
+        ))
+    return tuple(out)
+
+
+def _unplaced(gate, plugin: Asset, around: Provenance | None) -> Provenance:
+    from dataclasses import replace
+
+    if around is not None:
+        if around.state != AVAILABLE:
+            return around
+        return replace(around, plugin=plugin.name, plugin_version=plugin.version)
+    # A clone no registry lists (a host's own temporary checkout) still
+    # declares itself a marketplace one or two levels up.
+    parent = plugin.install_path
+    for _ in range(3):
+        parent = parent.rsplit("/", 1)[0]
+        market = marketplace_at(gate, parent) if parent else None
+        if market:
+            return Provenance(AVAILABLE, marketplace=market, plugin=plugin.name, plugin_version=plugin.version)
+    return Provenance(UNREGISTERED, plugin=plugin.name, plugin_version=plugin.version)
+
+
+def _container(paths, path: str | None, proper: bool = False) -> str | None:
+    """The nearest of `paths` that is `path` or one of its ancestors."""
+    probe = path.rsplit("/", 1)[0] if path and proper else path
+    while probe:
+        if probe in paths:
+            return probe
+        probe = probe.rsplit("/", 1)[0] if "/" in probe else ""
+    return None
 
 
 def _mark_undeclared(assets: tuple[Asset, ...], declarations) -> tuple[Asset, ...]:

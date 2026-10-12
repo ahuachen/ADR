@@ -12,7 +12,7 @@ import json
 from enum import Enum
 
 from ..contracts.evidence import Band, Channel, Evidence, Rung
-from ..contracts.records import Asset, Finding, Kind, Liveness, ReviewItem, Risk
+from ..contracts.records import Asset, Finding, Kind, Liveness, Provenance, ReviewItem, Risk, SourceRef
 from ..contracts.snapshot import (
     SCHEMA_VERSION,
     BoundaryHit,
@@ -114,6 +114,25 @@ def _asset(row: dict) -> Asset:
         package_id=row.get("package_id"),
         modified=row.get("modified"),
         running_versions=tuple(row.get("running_versions", ())),
+        provenance=_provenance(row.get("provenance")),
+        plugin_asset_id=row.get("plugin_asset_id"),
+    )
+
+
+def _provenance(row: dict | None) -> Provenance | None:
+    if not row:
+        return None
+    source = row.get("marketplace_source")
+    return Provenance(
+        state=row.get("state", "unregistered"),
+        host=row.get("host"),
+        marketplace=row.get("marketplace"),
+        marketplace_source=SourceRef(**source) if source else None,
+        plugin=row.get("plugin"),
+        plugin_version=row.get("plugin_version"),
+        install_scope=row.get("install_scope"),
+        installed_at=row.get("installed_at"),
+        enabled=row.get("enabled"),
     )
 
 

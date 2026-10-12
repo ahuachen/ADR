@@ -141,6 +141,19 @@ def _declaration(gate, entry, kind: Kind, scope: str, nested: bool, skipped: lis
     )
 
 
+def plugin_declaration(gate, path: str, scope: str, fallback: str) -> Declaration:
+    """A plugin directory a registry names, whether or not a surface reached it.
+
+    Installed plugins live in a host's cache, where no `plugins/` directory
+    holds them. Without a manifest the registry's name for it stands.
+    """
+    manifest = _manifest_of(gate, path, Kind.PLUGIN)
+    if manifest is None:
+        return Declaration(kind=Kind.PLUGIN, name=fallback, path=path, scope=scope,
+                           raw={"surface": Kind.PLUGIN.value})
+    return _plugin(gate, path, manifest, scope)
+
+
 def _plugin(gate, path: str, manifest: str, scope: str) -> Declaration:
     """A plugin directory, named and versioned by its manifest.
 

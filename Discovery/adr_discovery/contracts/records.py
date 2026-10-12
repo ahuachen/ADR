@@ -199,6 +199,28 @@ class SourceRef:
 
 
 @dataclass(frozen=True, slots=True)
+class Provenance:
+    """Where a plugin, or something shipped inside one, came from.
+
+    `state` is what the host's own registries say about the directory:
+    `installed` (an install record names it), `available` (it sits in a
+    marketplace clone, offered but not installed from there), `stale` (a
+    cached version no install record names) or `unregistered` (a plugin no
+    registry mentions). `enabled` is None when no settings file says.
+    """
+
+    state: str
+    host: str | None = None
+    marketplace: str | None = None
+    marketplace_source: SourceRef | None = None
+    plugin: str | None = None
+    plugin_version: str | None = None
+    install_scope: str | None = None
+    installed_at: str | None = None
+    enabled: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Asset:
     """M5 output, judged by M6, serialized by M7."""
 
@@ -243,6 +265,10 @@ class Asset:
     #: install runs next; after an update an older or newer release can
     #: still be running, and that is worth seeing.
     running_versions: tuple[str, ...] = ()
+    #: Plugins and everything inside one: marketplace, install and state.
+    provenance: Provenance | None = None
+    #: The plugin asset whose directory holds this one.
+    plugin_asset_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

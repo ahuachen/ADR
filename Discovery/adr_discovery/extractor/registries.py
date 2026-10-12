@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from ..contracts.records import SourceRef
+from ..contracts.records import Provenance, SourceRef
 from ..redact import rules as redact
 from .formats import parse as parse_document
 
@@ -145,6 +145,70 @@ def read_registries(gate, homes: tuple[str, ...]) -> Registries:
             f"{len(listings)} marketplace listings, {len(cached)} cached versions",
         )
     return found
+
+
+# ------------------------------------------------------------ provenance
+
+INSTALLED, AVAILABLE, STALE, UNREGISTERED = "installed", "available", "stale", "unregistered"
+#: Broadest first: a plugin installed for the user and for one project is a user install.
+_SCOPE_ORDER = ("user", "project", "local")
+
+
+def plugin_roots(found: Registries) -> tuple[tuple[str, Provenance, bool], ...]:
+    """(directory, provenance, is an installed copy) for everything the registries place.
+
+    Install records that name a missing directory place nothing; they are
+    counted in coverage by `read_registries`.
+    """
+    out: dict[str, tuple[Provenance, bool]] = {}
+    for market in found.marketplaces:
+        if market.location:
+            out[market.location.rstrip("/")] = (Provenance(
+                AVAILABLE, market.host, market.name, market.source), False)
+    for listing in found.listings:
+        market = found.marketplace(listing.host, listing.marketplace)
+        out[listing.path] = (Provenance(
+            AVAILABLE, listing.host, listing.marketplace, market.source if market else None,
+            plugin=listing.plugin), False)
+    for cached in found.cached:
+        out[cached.path] = (_provenance(found, STALE, [cached]), True)
+    installed: dict[str, list[Install]] = {}
+    for install in found.installs:
+        if install.present:
+            installed.setdefault(install.path, []).append(install)
+    for path, records in installed.items():
+        out[path] = (_provenance(found, INSTALLED, records), True)
+    return tuple((path, provenance, is_plugin) for path, (provenance, is_plugin) in out.items())
+
+
+def _provenance(found: Registries, state: str, records: list[Install]) -> Provenance:
+    first = records[0]
+    market = found.marketplace(first.host, first.marketplace)
+    if state != INSTALLED:
+        return Provenance(state, first.host, first.marketplace, market.source if market else None,
+                          first.plugin, first.version)
+    scopes = [r.scope for r in records if r.scope]
+    decided = [found.enabled(r) for r in records]
+    # On anywhere is on; off only when every record is decided off.
+    enabled = True if True in decided else (None if None in decided else False)
+    return Provenance(
+        state, first.host, first.marketplace, market.source if market else None,
+        first.plugin, first.version,
+        install_scope=min(scopes, key=lambda s: _SCOPE_ORDER.index(s) if s in _SCOPE_ORDER else 9, default=None),
+        installed_at=min((r.installed_at for r in records if r.installed_at), default=None),
+        enabled=enabled,
+    )
+
+
+def marketplace_at(gate, directory: str) -> str | None:
+    """The marketplace a clone at `directory` declares, if it is one."""
+    for suffix in MARKETPLACE_MANIFESTS:
+        path = directory + suffix
+        if gate.stat(path).ok:
+            document = _document(gate, path) or {}
+            name = document.get("name")
+            return name if isinstance(name, str) and name else directory.rsplit("/", 1)[-1]
+    return None
 
 
 # ----------------------------------------------------------------- claude
