@@ -184,6 +184,21 @@ class Risk:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceRef:
+    """Where a marketplace or plugin comes from, reduced to what identifies it.
+
+    `kind` is the host's own word (`github`, `git`, `url`, `git-subdir`,
+    `directory`, ...). `repo` is `host/owner/repo` for a git remote; `url`
+    has no userinfo, query or fragment; `path` is home-relative where it can be.
+    """
+
+    kind: str
+    repo: str | None = None
+    url: str | None = None
+    path: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Asset:
     """M5 output, judged by M6, serialized by M7."""
 

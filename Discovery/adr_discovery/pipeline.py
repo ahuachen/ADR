@@ -28,7 +28,9 @@ from .contracts.records import (
 )
 from .contracts.snapshot import Snapshot
 from .enumerator import enumerate_candidates
+from .enumerator.roots import homes
 from .extractor import extract
+from .extractor.registries import read_registries
 from .extractor.surfaces import surface_for
 from .identifier import content_hash, identify, is_reviewable, score, signals_for
 from .judge import EMPTY as EMPTY_POLICY
@@ -64,6 +66,7 @@ def discover(
     candidates = enumerate_candidates(gate)
 
     # -- M3 ------------------------------------------------------------
+    read_registries(gate, homes(gate))
     declarations: list[tuple[Candidate, Declaration]] = []
     for candidate in _dedupe_surfaces(gate, candidates):
         if candidate.kind == "marker_dir" and surface_for(candidate.path) is None:
