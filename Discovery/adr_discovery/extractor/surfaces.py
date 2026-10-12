@@ -16,6 +16,7 @@ from __future__ import annotations
 from types import MappingProxyType
 
 from ..contracts.records import Declaration, Kind
+from .formats import parse as parse_document
 from .formats.frontmatter import NoFrontmatter, parse_with_notes
 from .isolate import per_record
 
@@ -31,6 +32,8 @@ SURFACES: tuple[tuple[str, Kind, tuple[str, ...], bool], ...] = (
 
 SURFACE_NAMES = frozenset(name for name, _, _, _ in SURFACES)
 ENTRY_CAP = 500
+#: A plugin manifest is a few hundred bytes; anything near this is not one.
+MANIFEST_LIMIT = 64 * 1024
 
 
 def surface_for(path: str):
@@ -91,7 +94,7 @@ def _is_member(entry, suffixes: tuple[str, ...], nested: bool) -> bool:
 #: endpoint reported 191 assets, most of them internal bookkeeping.
 MANIFESTS = MappingProxyType({
     Kind.SKILL: ("/SKILL.md",),
-    Kind.PLUGIN: ("/.claude-plugin/plugin.json", "/plugin.json"),
+    Kind.PLUGIN: ("/.claude-plugin/plugin.json", "/.codex-plugin/plugin.json", "/plugin.json"),
 })
 
 
@@ -101,6 +104,9 @@ def _declaration(gate, entry, kind: Kind, scope: str, nested: bool, skipped: lis
 
     if nested:
         body_path = _manifest_of(gate, entry.path, kind)
+
+    if kind is Kind.PLUGIN and nested:
+        return _plugin(gate, entry.path, body_path, scope)
 
     metadata: dict[str, object] = {}
     if body_path.endswith(".md"):
@@ -130,6 +136,48 @@ def _declaration(gate, entry, kind: Kind, scope: str, nested: bool, skipped: lis
         kind=kind,
         name=declared_name,
         path=entry.path,
+        scope=scope,
+        raw=raw,
+    )
+
+
+def _plugin(gate, path: str, manifest: str, scope: str) -> Declaration:
+    """A plugin directory, named and versioned by its manifest.
+
+    Only `name`, `version` and the author's name are read. Descriptions,
+    keywords, homepages and author emails stay on the machine. A manifest
+    that cannot be read leaves the plugin in the inventory, flagged, with the
+    reason in coverage: the directory is still there and still loads.
+    """
+    raw: dict[str, object] = {"surface": Kind.PLUGIN.value}
+    name = path.rsplit("/", 1)[-1]
+    text = gate.read_text(manifest, limit=MANIFEST_LIMIT)
+    document: object = None
+    if not text.ok:
+        reason = text.reason
+    else:
+        try:
+            document = parse_document(text.value, "json")
+            reason = "" if isinstance(document, dict) else "manifest root is not an object"
+        except ValueError as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+    if reason:
+        gate.ledger.probe("plugin_manifest", "degraded", f"{manifest}: {reason}")
+        raw["flags"] = ("malformed",)
+        return Declaration(kind=Kind.PLUGIN, name=name, path=path, scope=scope, raw=raw)
+
+    declared = document.get("name")
+    version = _as_version(document.get("version"))
+    if version:
+        raw["version"] = version
+    author = document.get("author")
+    author = author.get("name") if isinstance(author, dict) else author
+    if isinstance(author, str) and author.strip():
+        raw["vendor"] = author.strip()
+    return Declaration(
+        kind=Kind.PLUGIN,
+        name=declared if isinstance(declared, str) and declared else name,
+        path=path,
         scope=scope,
         raw=raw,
     )
