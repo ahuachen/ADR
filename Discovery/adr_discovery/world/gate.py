@@ -16,6 +16,7 @@ directory, and a relative segment inside a config can climb out of the tree.
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import signal
 import subprocess
@@ -23,7 +24,8 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Generic, Iterator, TypeVar
+from stat import S_ISDIR, S_ISREG
+from typing import Callable, Generic, Iterator, Protocol, TypeVar
 
 from ..coverage.ledger import Ledger
 from ..redact import rules as redact
@@ -76,6 +78,43 @@ class Stat:
     mode: int
     mtime: float
     owner: str
+
+
+@dataclass(frozen=True, slots=True)
+class Tree:
+    """What one complete pass over a directory tree covered."""
+
+    files: int
+    bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class TreeDigest:
+    sha256: str
+    files: int
+    bytes: int
+
+
+class TreeSink(Protocol):
+    """Receives a tree's regular files in folder-hash order."""
+
+    def begin(self, rel: bytes, mode: int) -> None: ...
+
+    def update(self, chunk: bytes) -> None: ...
+
+
+class FolderHash:
+    """The folder hash: per file, ``<rel>\n<x>\n`` then the raw bytes, all
+    into one running sha256. ``x`` is 1 when any execute bit is set."""
+
+    def __init__(self) -> None:
+        self.digest = hashlib.sha256()
+
+    def begin(self, rel: bytes, mode: int) -> None:
+        self.digest.update(rel + (b"\n1\n" if mode & 0o111 else b"\n0\n"))
+
+    def update(self, chunk: bytes) -> None:
+        self.digest.update(chunk)
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,6 +470,132 @@ class Gate:
             )
             return "fan_out"
         return None
+
+    # ---------------------------------------------------------------- trees
+
+    def hash_tree(self, logical_root: str) -> Result[TreeDigest]:
+        """The folder hash of a directory, or a recorded reason there is none.
+
+        Every regular file under the root, symlinks never followed, sorted by
+        its ``/``-separated relative path byte-wise, folded into one running
+        sha256 as ``<rel>\\n<x>\\n`` then its bytes (``x`` is 1 when any
+        execute bit is set). Equal trees hash equal wherever they sit.
+        """
+        sink = FolderHash()
+        read = self.read_tree(logical_root, sink)
+        if not read.ok:
+            return read
+        return Ok(TreeDigest(sink.digest.hexdigest(), read.value.files, read.value.bytes))
+
+    def read_tree(self, logical_root: str, sink: TreeSink) -> Result[Tree]:
+        """Feed every regular file under a directory to `sink`, in order.
+
+        All or nothing: a tree over a cap, or with any file that cannot be
+        listed or read, is refused and recorded, and whatever `sink` was
+        given must be discarded. A partial hash would name a tree that does
+        not exist. Bytes are charged to the hashing budget, not the entry
+        ceiling, and are claimed for the whole tree before the first read.
+        """
+        validated = self._validate(logical_root)
+        if not validated.ok:
+            return validated
+        resolved = validated.value
+        listed = self._tree_members(logical_root, resolved)
+        if not listed.ok:
+            return listed
+        members = listed.value
+        declared = sum(size for _, _, size in members)
+        if declared > self.budget.max_tree_bytes:
+            return self._tree_refused(
+                logical_root, "tree_too_large", f"{declared} bytes; cap {self.budget.max_tree_bytes}"
+            )
+        if not self.budget.take_hash_bytes(declared):
+            return self._tree_refused(
+                logical_root, "hash_budget_exhausted", f"cap {self.budget.max_hash_bytes} bytes"
+            )
+
+        total = 0
+        for key, rel, _ in members:
+            logical = self.logical_path(os.path.join(resolved, *rel.split("/")))
+            fed = self._feed_file(logical, key, sink)
+            if not fed.ok:
+                return self._tree_refused(logical_root, "unreadable_member", f"{rel}: {fed.reason}")
+            total += fed.value
+            if total > self.budget.max_tree_bytes:
+                return self._tree_refused(
+                    logical_root, "tree_too_large", f"grew past {self.budget.max_tree_bytes} bytes"
+                )
+        return Ok(Tree(len(members), total))
+
+    def _tree_members(self, logical_root: str, resolved: str) -> Result[list[tuple[bytes, str, int]]]:
+        """(sort key, relative path, size) for each regular file, sorted.
+
+        Not charged to the entry ceiling, which the sweep may already have
+        spent: a truncated listing would become a partial hash. The per-tree
+        file cap bounds it instead. Each file is still opened through the
+        validated, descriptor-checked path before a byte is read.
+        """
+        members: list[tuple[bytes, str, int]] = []
+        pending = [""]
+        while pending:
+            rel_dir = pending.pop()
+            try:
+                with os.scandir(os.path.join(resolved, *rel_dir.split("/")) if rel_dir else resolved) as listing:
+                    entries = list(listing)
+            except OSError as exc:
+                return self._tree_refused(
+                    logical_root, "unlistable", f"{rel_dir or '.'}: {exc.strerror or exc}"
+                )
+            for entry in entries:
+                rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    return self._tree_refused(logical_root, "unlistable", rel)
+                if S_ISDIR(info.st_mode):
+                    pending.append(rel)
+                elif S_ISREG(info.st_mode):
+                    if info.st_size > self.budget.max_tree_file_bytes:
+                        return self._tree_refused(
+                            logical_root, "file_too_large",
+                            f"{rel}: {info.st_size} bytes; cap {self.budget.max_tree_file_bytes}",
+                        )
+                    members.append((os.fsencode(rel), rel, info.st_size))
+                    if len(members) > self.budget.max_tree_files:
+                        return self._tree_refused(
+                            logical_root, "too_many_files", f"cap {self.budget.max_tree_files}"
+                        )
+        members.sort()
+        return Ok(members)
+
+    def _feed_file(self, logical: str, key: bytes, sink: TreeSink) -> Result[int]:
+        validated = self._validate(logical)
+        if not validated.ok:
+            return validated
+        opened = self._open_verified(logical, validated.value)
+        if not opened.ok:
+            return opened
+        fd = opened.value
+        size = 0
+        try:
+            mode = os.fstat(fd).st_mode
+            if not S_ISREG(mode):
+                return Refused("not_regular", logical)
+            sink.begin(key, mode)
+            while chunk := os.read(fd, 1 << 20):
+                size += len(chunk)
+                if size > self.budget.max_tree_file_bytes:
+                    return Refused("file_too_large", logical)
+                sink.update(chunk)
+        except OSError as exc:
+            return Refused("read_failed", exc.strerror or str(exc))
+        finally:
+            os.close(fd)
+        return Ok(size)
+
+    def _tree_refused(self, logical_root: str, reason: str, detail: str) -> Refused:
+        self.ledger.boundary(logical_root, "no_folder_hash", f"{reason}: {detail}")
+        return Refused(reason, detail)
 
     # ------------------------------------------------------------ processes
 

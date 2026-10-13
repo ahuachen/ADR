@@ -44,6 +44,17 @@ Compare the current scan with an earlier snapshot:
 uv run adr-discovery --diff /path/to/snapshot.json --dry-run --json
 ```
 
+Keep a local, owner-only zip of every skill, named by its folder hash:
+
+```sh
+uv run adr-discovery --output-dir ./output --archive-skills
+```
+
+To report a malicious skill, ask Claude Code to use the
+`submit-malicious-skill` skill in `.claude/skills/`: it prepares a GitHub
+issue naming the skill's folder hash, and you attach the skill's zip to that
+issue.
+
 Apply a tenant policy or last-used telemetry during a scan:
 
 ```sh
@@ -81,7 +92,7 @@ the same kinds as a shared known-bad artifact feed. See
 
 | Indicator | Matches |
 | --- | --- |
-| `{"kind": "skill_sha256", "sha256": ...}` | Skills whose raw `SKILL.md` bytes hash to it (`skill_sha256` on the asset) |
+| `{"kind": "skill_sha256", "sha256": ...}` | Skills whose folder hash equals it (`skill_sha256` on the asset; schema 1.2, see the [package documentation](adr_discovery/README.md#the-snapshot)) |
 | `{"kind": "file_sha256", "sha256": ...}` | Assets whose `content_hash` equals it |
 | `{"kind": "mcp_endpoint", "url": ...}` | MCP servers declaring that URL (scheme/host case, query and trailing slash ignored) |
 | `{"kind": "package", "ecosystem": "npm"\|"pypi", "name": ..., "versions": [...] \| "all_versions": true}` | MCP servers launched with `npx`/`bunx`/`pnpm dlx`/`uvx`/`pipx` for that package, and package-manager assets. A launch that pins no version matches only `all_versions` |

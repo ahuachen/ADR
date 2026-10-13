@@ -105,5 +105,5 @@ jobs:
 def test_schema_version_is_bumped_and_round_trips(world, catalog):
     snapshot = discover(world.gate(), catalog)
 
-    assert snapshot.schema_version == "1.1"
-    assert from_dict(json.loads(to_json(snapshot))).schema_version == "1.1"
+    assert snapshot.schema_version == "1.2"
+    assert from_dict(json.loads(to_json(snapshot))).schema_version == "1.2"

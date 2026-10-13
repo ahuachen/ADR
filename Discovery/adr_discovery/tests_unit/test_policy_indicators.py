@@ -245,9 +245,9 @@ def test_judge_uses_the_declaration_for_endpoint_sanction():
 # -------------------------------------------------------------- end to end
 
 
-def test_a_skill_is_forbidden_by_the_sha256_of_its_raw_skill_md(world, catalog):
+def test_a_skill_is_forbidden_by_its_folder_hash(world, catalog):
     body = "---\nname: shady\n---\nraw bytes \r\n kept exactly\n"
-    digest = hashlib.sha256(body.encode()).hexdigest()
+    digest = hashlib.sha256(b"SKILL.md\n0\n" + body.encode()).hexdigest()
     world.dir("/Users/a")
     world.file("/Users/a/.claude/skills/shady/SKILL.md", body)
     world.file("/Users/a/.claude/skills/fine/SKILL.md", "---\nname: fine\n---\nx\n")
@@ -300,4 +300,4 @@ def test_new_asset_fields_round_trip(world, catalog):
     again = from_dict(json.loads(to_json(snapshot)))
 
     (skill,) = [a for a in again.assets if a.kind is Kind.SKILL]
-    assert skill.skill_sha256 == hashlib.sha256(b"---\nname: s\n---\nx\n").hexdigest()
+    assert skill.skill_sha256 == hashlib.sha256(b"SKILL.md\n0\n---\nname: s\n---\nx\n").hexdigest()

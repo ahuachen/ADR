@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from .archive import Archiver
 from .catalog.load import EMPTY as EMPTY_CATALOG
 from .catalog.load import Catalog
 from .contracts.evidence import Channel, Evidence
@@ -24,17 +25,28 @@ from .contracts.records import (
     Kind,
     Liveness,
     Observation,
+    Provenance,
     ReviewItem,
 )
 from .contracts.snapshot import Snapshot
 from .enumerator import enumerate_candidates
+from .enumerator.roots import homes
 from .extractor import extract
-from .extractor.surfaces import surface_for
+from .extractor.registries import (
+    AVAILABLE,
+    UNREGISTERED,
+    home_relative,
+    marketplace_at,
+    plugin_roots,
+    read_registries,
+)
+from .extractor.surfaces import plugin_declaration, surface_for
 from .identifier import content_hash, identify, is_reviewable, score, signals_for
 from .judge import EMPTY as EMPTY_POLICY
 from .judge import Policy, judge
 from .resolver import resolve
 from .world.gate import Gate
+from .world.store import ArchiveStore
 
 CATALOG_RESOURCE = "catalog/catalog.json"
 
@@ -55,8 +67,13 @@ def discover(
     username: str = "unknown",
     platform_name: str = "unknown",
     timestamp: str = "",
+    archive_to: ArchiveStore | None = None,
 ) -> Snapshot:
-    """One scan, one snapshot. Emitted even when nothing is found."""
+    """One scan, one snapshot. Emitted even when nothing is found.
+
+    With `archive_to`, every skill that has a folder hash is also archived
+    there (see `archive`), and its asset says where.
+    """
     catalog = catalog if catalog is not None else EMPTY_CATALOG
     ledger = gate.ledger
 
@@ -64,6 +81,8 @@ def discover(
     candidates = enumerate_candidates(gate)
 
     # -- M3 ------------------------------------------------------------
+    registries = read_registries(gate, homes(gate))
+    roots = plugin_roots(registries)
     declarations: list[tuple[Candidate, Declaration]] = []
     for candidate in _dedupe_surfaces(gate, candidates):
         if candidate.kind == "marker_dir" and surface_for(candidate.path) is None:
@@ -78,6 +97,7 @@ def discover(
             )
         for declaration in extraction.declarations:
             declarations.append((candidate, declaration))
+    declarations.extend(_registered_plugins(gate, roots, declarations))
 
     # -- M4 ------------------------------------------------------------
     observations: list[Observation] = []
@@ -104,6 +124,9 @@ def discover(
     # -- M5 ------------------------------------------------------------
     assets = resolve(tuple(observations), telemetry, ledger)
     assets = _mark_undeclared(assets, declarations)
+    assets = _with_provenance(gate, assets, roots)
+    if archive_to is not None:
+        assets = _archived(gate, assets, archive_to, timestamp)
 
     # -- M6 ------------------------------------------------------------
     by_asset = _declarations_by_asset(assets, declarations)
@@ -125,6 +148,45 @@ def discover(
 
 
 # --------------------------------------------------------------- adapters
+
+
+def _archived(gate, assets, store: ArchiveStore, timestamp: str):
+    """Archive each hashed skill; a skill that cannot be archived keeps its
+    asset and leaves a degraded probe saying why."""
+    from dataclasses import asdict, replace
+
+    try:
+        store.open()
+    except OSError as exc:
+        gate.ledger.unavailable("skill_archive", exc.strerror or str(exc))
+        return assets
+    archiver = Archiver(store, timestamp)
+    user_homes = homes(gate)
+    out, archived, written = [], 0, 0
+    for asset in assets:
+        if asset.kind is not Kind.SKILL or not asset.skill_sha256 or not asset.install_path:
+            out.append(asset)
+            continue
+        result = archiver.archive(gate, asset.install_path, expected=asset.skill_sha256)
+        if not result.ok:
+            gate.ledger.probe("skill_archive", "degraded",
+                              f"{asset.install_path}: {result.reason} {result.detail}".rstrip())
+            out.append(asset)
+            continue
+        home = next((h for h in user_homes if asset.install_path.startswith(h.rstrip("/") + "/")), None)
+        archiver.record(
+            result.value, name=asset.name, source=home_relative(asset.install_path, home),
+            provenance=asdict(asset.provenance) if asset.provenance else None,
+        )
+        archived += 1
+        written += result.value.written
+        out.append(replace(asset, archive=result.value.ref))
+    try:
+        archiver.close()
+    except OSError as exc:
+        gate.ledger.probe("skill_archive", "degraded", f"index not written: {exc.strerror or exc}")
+    gate.ledger.probe("skill_archive", "ran", f"{archived} skills archived, {written} new archives")
+    return tuple(out)
 
 
 def _dedupe_surfaces(gate, candidates) -> list[Candidate]:
@@ -247,11 +309,13 @@ def _observation_from_declaration(candidate: Candidate, declaration: Declaration
         changed_file = f"{declaration.path.rstrip('/')}/SKILL.md"
     modified = _modified(gate.stat(changed_file)) if gate is not None else None
     if declaration.kind is Kind.SKILL and gate is not None:
-        # sha256 of the raw SKILL.md bytes, exactly: the identity a shared
-        # artifact list uses. One size-capped read, never partial bytes.
-        digest = content_hash(gate, changed_file)
-        if digest:
-            detail["skill_sha256"] = digest
+        # The folder hash of the whole skill directory: a payload in
+        # scripts/ changes it as surely as an edit to SKILL.md does. A tree
+        # over the caps, or with an unreadable file, gets none (recorded by
+        # the gate) rather than a hash of part of it.
+        digest = gate.hash_tree(declaration.path)
+        if digest.ok:
+            detail["skill_sha256"] = digest.value.sha256
     if declaration.kind is not Kind.MCP_SERVER:
         detail["install_method"] = "agent_artifact"
     version = declaration.raw.get("version")
@@ -284,6 +348,81 @@ def _alias_evidence(candidate: Candidate, declaration: Declaration) -> tuple[Evi
         Evidence("enumerator", Channel.CONFIG, alias, f"links to {declaration.path}", 0.85)
         for alias in candidate.detail.get("aliases", ())
     )
+
+
+def _registered_plugins(gate, roots, declarations) -> list[tuple[Candidate, Declaration]]:
+    """An installed or cached copy of a plugin is a plugin, wherever it sits.
+
+    A marketplace's listings are not added: a large one offers thousands of
+    plugins, none of them loaded from there, and what the sweep does reach
+    inside them still gets their provenance.
+    """
+    seen = {d.path for _, d in declarations if d.kind is Kind.PLUGIN}
+    out = []
+    for path, provenance, installed_copy in roots:
+        if not installed_copy or path in seen or not gate.stat(path).ok:
+            continue
+        candidate = Candidate(kind="marker_dir", path=path, source="plugin_registry")
+        out.append((candidate, plugin_declaration(gate, path, "plugin", provenance.plugin or path.rsplit("/", 1)[-1])))
+    return out
+
+
+def _with_provenance(gate, assets: tuple[Asset, ...], roots) -> tuple[Asset, ...]:
+    """Attach what the registries say to every asset inside a placed directory.
+
+    The innermost placed directory decides. A plugin no registry places
+    is `available` when a marketplace clone holds it and `unregistered`
+    otherwise, and what it contains inherits that.
+    """
+    from dataclasses import replace
+
+    placed = {path: provenance for path, provenance, _ in roots}
+    plugins = {a.install_path: a for a in assets if a.kind is Kind.PLUGIN and a.install_path}
+    for path in sorted(plugins, key=len):
+        if path not in placed:
+            around = _container(placed, path)
+            placed[path] = _unplaced(gate, plugins[path], placed[around] if around else None)
+
+    out = []
+    for asset in assets:
+        root = _container(placed, asset.install_path)
+        if root is None:
+            out.append(asset)
+            continue
+        owner = _container(plugins, asset.install_path, proper=True)
+        out.append(replace(
+            asset, provenance=placed[root],
+            plugin_asset_id=plugins[owner].asset_id if owner else None,
+        ))
+    return tuple(out)
+
+
+def _unplaced(gate, plugin: Asset, around: Provenance | None) -> Provenance:
+    from dataclasses import replace
+
+    if around is not None:
+        if around.state != AVAILABLE:
+            return around
+        return replace(around, plugin=plugin.name, plugin_version=plugin.version)
+    # A clone no registry lists (a host's own temporary checkout) still
+    # declares itself a marketplace one or two levels up.
+    parent = plugin.install_path
+    for _ in range(3):
+        parent = parent.rsplit("/", 1)[0]
+        market = marketplace_at(gate, parent) if parent else None
+        if market:
+            return Provenance(AVAILABLE, marketplace=market, plugin=plugin.name, plugin_version=plugin.version)
+    return Provenance(UNREGISTERED, plugin=plugin.name, plugin_version=plugin.version)
+
+
+def _container(paths, path: str | None, proper: bool = False) -> str | None:
+    """The nearest of `paths` that is `path` or one of its ancestors."""
+    probe = path.rsplit("/", 1)[0] if path and proper else path
+    while probe:
+        if probe in paths:
+            return probe
+        probe = probe.rsplit("/", 1)[0] if "/" in probe else ""
+    return None
 
 
 def _mark_undeclared(assets: tuple[Asset, ...], declarations) -> tuple[Asset, ...]:

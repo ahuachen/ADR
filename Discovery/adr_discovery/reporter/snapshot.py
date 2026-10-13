@@ -12,7 +12,17 @@ import json
 from enum import Enum
 
 from ..contracts.evidence import Band, Channel, Evidence, Rung
-from ..contracts.records import Asset, Finding, Kind, Liveness, ReviewItem, Risk
+from ..contracts.records import (
+    ArchiveRef,
+    Asset,
+    Finding,
+    Kind,
+    Liveness,
+    Provenance,
+    ReviewItem,
+    Risk,
+    SourceRef,
+)
 from ..contracts.snapshot import (
     SCHEMA_VERSION,
     BoundaryHit,
@@ -107,11 +117,33 @@ def _asset(row: dict) -> Asset:
         flags=tuple(row.get("flags", ())),
         hook_event=row.get("hook_event"),
         hook_matcher=row.get("hook_matcher"),
+        allowed_tools=tuple(row.get("allowed_tools", ())),
+        model=row.get("model"),
         skill_sha256=row.get("skill_sha256"),
         content_hash=row.get("content_hash"),
         package_id=row.get("package_id"),
         modified=row.get("modified"),
         running_versions=tuple(row.get("running_versions", ())),
+        provenance=_provenance(row.get("provenance")),
+        plugin_asset_id=row.get("plugin_asset_id"),
+        archive=ArchiveRef(**row["archive"]) if row.get("archive") else None,
+    )
+
+
+def _provenance(row: dict | None) -> Provenance | None:
+    if not row:
+        return None
+    source = row.get("marketplace_source")
+    return Provenance(
+        state=row.get("state", "unregistered"),
+        host=row.get("host"),
+        marketplace=row.get("marketplace"),
+        marketplace_source=SourceRef(**source) if source else None,
+        plugin=row.get("plugin"),
+        plugin_version=row.get("plugin_version"),
+        install_scope=row.get("install_scope"),
+        installed_at=row.get("installed_at"),
+        enabled=row.get("enabled"),
     )
 
 
